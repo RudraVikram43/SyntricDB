@@ -109,3 +109,15 @@ Requires a running SyntricDB server and NuGet access (xUnit + the .NET Test SDK)
 cd SyntricDb.Data.Tests
 SYNTRICDB_TEST_HOST=localhost SYNTRICDB_TEST_PORT=8080 dotnet test
 ```
+
+### Troubleshooting: `dotnet restore` hangs / times out reaching nuget.org
+
+If `dotnet restore` or `dotnet test` hangs for ~100s per package and then fails with
+`NU1301: ... has timed out`, while `curl https://api.nuget.org/v3/index.json` succeeds
+instantly, your network likely has IPv6 egress that's silently dropped (black-holed)
+rather than refused — some sandboxes and corporate networks do this. .NET's HTTP client
+doesn't fail over to IPv4 quickly in that case, so it burns the whole timeout. Force IPv4:
+
+```bash
+export DOTNET_SYSTEM_NET_DISABLEIPV6=1
+```
