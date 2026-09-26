@@ -20,6 +20,8 @@ deploy/clients/python/dist/
 deploy/clients/python/*.egg-info/
 deploy/clients/nodejs/*.tgz
 deploy/clients/java/target/
+deploy/clients/csharp/**/bin/
+deploy/clients/csharp/**/obj/
 
 
 # Maven build outputs

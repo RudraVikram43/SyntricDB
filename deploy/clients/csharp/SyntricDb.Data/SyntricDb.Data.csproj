@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>SyntricDB.Data</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Upendra Manike</Authors>
+    <Description>Official ADO.NET provider for SyntricDB AI-Native Unified Database Engine (DbConnection/DbCommand/DbDataReader), for use with Dapper, raw ADO.NET, or DbProviderFactories.</Description>
+    <RepositoryUrl>https://github.com/upendra-manike/SyntricDB</RepositoryUrl>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+</Project>
