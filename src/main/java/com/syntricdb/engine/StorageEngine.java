@@ -176,7 +176,7 @@ public class StorageEngine implements AutoCloseable {
         streamEngine.publish("table_" + db.getName() + "_" + tableName, streamEvent);
     }
 
-    public int update(String dbName, String tableName, Map<String, Object> setAssignments, List<com.syntricdb.sql.AST.Condition> conditions) throws IOException {
+    public int update(String dbName, String tableName, Map<String, Object> setAssignments, com.syntricdb.sql.AST.WhereExpr whereExpr) throws IOException {
         Database db = getDatabase(dbName);
         if (db == null) return 0;
         tableName = tableName.toLowerCase();
@@ -186,7 +186,7 @@ public class StorageEngine implements AutoCloseable {
         List<Tuple> matches = scanAll(dbName, tableName);
         int count = 0;
         for (Tuple existing : matches) {
-            if (matchesConditions(existing, conditions)) {
+            if (com.syntricdb.sql.WhereEvaluator.matches(existing, whereExpr)) {
                 for (Map.Entry<String, Object> entry : setAssignments.entrySet()) {
                     existing.set(entry.getKey(), entry.getValue());
                 }
@@ -197,7 +197,7 @@ public class StorageEngine implements AutoCloseable {
         return count;
     }
 
-    public int delete(String dbName, String tableName, List<com.syntricdb.sql.AST.Condition> conditions) throws IOException {
+    public int delete(String dbName, String tableName, com.syntricdb.sql.AST.WhereExpr whereExpr) throws IOException {
         Database db = getDatabase(dbName);
         if (db == null) return 0;
         tableName = tableName.toLowerCase();
@@ -212,7 +212,7 @@ public class StorageEngine implements AutoCloseable {
         String vectorCol = schema.getVectorColumn();
 
         for (Tuple existing : matches) {
-            if (matchesConditions(existing, conditions)) {
+            if (com.syntricdb.sql.WhereEvaluator.matches(existing, whereExpr)) {
                 String pkVal = existing.get(pkCol) != null ? existing.get(pkCol).toString() : null;
                 if (pkVal != null) {
                     if (store != null) store.remove(pkVal);
@@ -230,27 +230,6 @@ public class StorageEngine implements AutoCloseable {
             }
         }
         return count;
-    }
-
-    private boolean matchesConditions(Tuple tuple, List<com.syntricdb.sql.AST.Condition> conditions) {
-        if (conditions == null || conditions.isEmpty()) return true;
-        for (com.syntricdb.sql.AST.Condition cond : conditions) {
-            Object val = tuple.get(cond.getColumn());
-            if (val == null) return false;
-            String op = cond.getOperator();
-            Object target = cond.getValue();
-            if ("=".equals(op) && !val.toString().equals(target.toString())) return false;
-            if ("!=".equals(op) && !val.toString().equals(target.toString())) return false;
-            if (val instanceof Number && target instanceof Number) {
-                double v = ((Number) val).doubleValue();
-                double t = ((Number) target).doubleValue();
-                if (">".equals(op) && v <= t) return false;
-                if ("<".equals(op) && v >= t) return false;
-                if (">=".equals(op) && v < t) return false;
-                if ("<=".equals(op) && v > t) return false;
-            }
-        }
-        return true;
     }
 
 

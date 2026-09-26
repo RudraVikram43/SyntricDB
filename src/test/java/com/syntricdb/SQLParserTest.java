@@ -98,4 +98,96 @@ public class SQLParserTest {
         assertTrue(stmt instanceof AST.SelectStatement);
         assertEquals("price * 1.5 AS total", ((AST.SelectStatement) stmt).getSelectItems().get(0).getColumnName());
     }
+
+    @Test
+    public void testParseWhereOr() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE city = 'A' OR city = 'B'");
+        assertTrue(stmt.getWhereExpression() instanceof AST.OrExpr);
+        assertEquals(2, ((AST.OrExpr) stmt.getWhereExpression()).getOperands().size());
+    }
+
+    @Test
+    public void testParseWhereAndBindsTighterThanOr() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE a = 1 AND b = 2 OR c = 3");
+        AST.WhereExpr expr = stmt.getWhereExpression();
+        assertTrue(expr instanceof AST.OrExpr);
+        AST.OrExpr or = (AST.OrExpr) expr;
+        assertEquals(2, or.getOperands().size());
+        assertTrue(or.getOperands().get(0) instanceof AST.AndExpr);
+        assertTrue(or.getOperands().get(1) instanceof AST.ComparisonExpr);
+    }
+
+    @Test
+    public void testParseWhereParenthesesOverridePrecedence() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE a = 1 AND (b = 2 OR c = 3)");
+        AST.WhereExpr expr = stmt.getWhereExpression();
+        assertTrue(expr instanceof AST.AndExpr);
+        AST.AndExpr and = (AST.AndExpr) expr;
+        assertEquals(2, and.getOperands().size());
+        assertTrue(and.getOperands().get(1) instanceof AST.OrExpr);
+    }
+
+    @Test
+    public void testParseWhereNot() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE NOT city = 'A'");
+        assertTrue(stmt.getWhereExpression() instanceof AST.NotExpr);
+    }
+
+    @Test
+    public void testParseWhereLike() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE name LIKE 'A%'");
+        AST.WhereExpr expr = stmt.getWhereExpression();
+        assertTrue(expr instanceof AST.LikeExpr);
+        AST.LikeExpr like = (AST.LikeExpr) expr;
+        assertEquals("name", like.getColumn());
+        assertEquals("A%", like.getPattern());
+        assertFalse(like.isNegated());
+    }
+
+    @Test
+    public void testParseWhereNotLike() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE name NOT LIKE 'A%'");
+        assertTrue(((AST.LikeExpr) stmt.getWhereExpression()).isNegated());
+    }
+
+    @Test
+    public void testParseWhereIn() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE city IN ('A', 'B', 'C')");
+        AST.WhereExpr expr = stmt.getWhereExpression();
+        assertTrue(expr instanceof AST.InExpr);
+        AST.InExpr in = (AST.InExpr) expr;
+        assertEquals("city", in.getColumn());
+        assertEquals(3, in.getValues().size());
+        assertFalse(in.isNegated());
+    }
+
+    @Test
+    public void testParseWhereBetween() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE age BETWEEN 18 AND 65");
+        AST.WhereExpr expr = stmt.getWhereExpression();
+        assertTrue(expr instanceof AST.BetweenExpr);
+        AST.BetweenExpr between = (AST.BetweenExpr) expr;
+        assertEquals("age", between.getColumn());
+        assertEquals(18, between.getLow());
+        assertEquals(65, between.getHigh());
+    }
+
+    @Test
+    public void testParseWhereIsNull() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE bio IS NULL");
+        AST.WhereExpr expr = stmt.getWhereExpression();
+        assertTrue(expr instanceof AST.IsNullExpr);
+        assertFalse(((AST.IsNullExpr) expr).isNegated());
+
+        AST.SelectStatement stmt2 = (AST.SelectStatement) parser.parse("SELECT * FROM users WHERE bio IS NOT NULL");
+        assertTrue(((AST.IsNullExpr) stmt2.getWhereExpression()).isNegated());
+    }
+
+    @Test
+    public void testParseWhereVectorSearchStillCombinesWithAnd() throws Exception {
+        AST.SelectStatement stmt = (AST.SelectStatement) parser.parse(
+                "SELECT * FROM users WHERE city = 'A' AND embedding SIMILAR TO 'query text' TOP 3");
+        assertNotNull(stmt.getVectorSearchCondition());
+        assertTrue(stmt.getWhereExpression() instanceof AST.ComparisonExpr);
+    }
 }

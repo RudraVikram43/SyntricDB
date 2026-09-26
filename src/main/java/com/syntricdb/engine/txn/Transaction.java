@@ -27,27 +27,27 @@ public class Transaction {
         public final String table;
         public final Tuple tuple;
         public final Map<String, Object> setAssignments;
-        public final List<AST.Condition> whereConditions;
+        public final AST.WhereExpr whereExpr;
 
         public static PendingWrite forInsert(String database, String table, Tuple tuple) {
             return new PendingWrite(OpType.INSERT, database, table, tuple, null, null);
         }
 
-        public static PendingWrite forUpdate(String database, String table, Map<String, Object> setAssignments, List<AST.Condition> whereConditions) {
-            return new PendingWrite(OpType.UPDATE, database, table, null, setAssignments, whereConditions);
+        public static PendingWrite forUpdate(String database, String table, Map<String, Object> setAssignments, AST.WhereExpr whereExpr) {
+            return new PendingWrite(OpType.UPDATE, database, table, null, setAssignments, whereExpr);
         }
 
-        public static PendingWrite forDelete(String database, String table, List<AST.Condition> whereConditions) {
-            return new PendingWrite(OpType.DELETE, database, table, null, null, whereConditions);
+        public static PendingWrite forDelete(String database, String table, AST.WhereExpr whereExpr) {
+            return new PendingWrite(OpType.DELETE, database, table, null, null, whereExpr);
         }
 
-        private PendingWrite(OpType type, String database, String table, Tuple tuple, Map<String, Object> setAssignments, List<AST.Condition> whereConditions) {
+        private PendingWrite(OpType type, String database, String table, Tuple tuple, Map<String, Object> setAssignments, AST.WhereExpr whereExpr) {
             this.type = type;
             this.database = database;
             this.table = table;
             this.tuple = tuple;
             this.setAssignments = setAssignments;
-            this.whereConditions = whereConditions;
+            this.whereExpr = whereExpr;
         }
     }
 

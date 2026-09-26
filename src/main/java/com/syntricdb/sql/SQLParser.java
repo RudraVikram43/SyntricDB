@@ -204,6 +204,8 @@ public class SQLParser {
                 if (valStr.toUpperCase().startsWith("AI_EMBED(")) {
                     String text = extractAiEmbedArg(valStr);
                     tuple.set(colName, aiEngine.aiEmbed(text));
+                } else if ("NULL".equalsIgnoreCase(valStr)) {
+                    tuple.set(colName, null);
                 } else {
                     tuple.set(colName, unquote(valStr));
                 }
@@ -260,42 +262,54 @@ public class SQLParser {
             }
         }
 
-        // Where clauses
+        // Where clauses. SIMILAR TO / MATCH(...) drive a dedicated index strategy and were
+        // only ever supported as bare top-level AND'd conjuncts (never mixed with OR), so when
+        // either appears we split on top-level AND (BETWEEN-aware) to carve them out and AND
+        // the rest back together. Otherwise the whole clause is handed straight to the general
+        // parser, which natively implements AND/OR/NOT/parens/LIKE/IN/BETWEEN with correct
+        // precedence (AND binds tighter than OR) — something a pre-split-then-AND-recombine
+        // approach cannot do once OR is mixed in at the top level.
         if (whereBody != null && !whereBody.isBlank()) {
-            String[] conds = whereBody.split("(?i)\\s+AND\\s+");
-            for (String cond : conds) {
-                cond = cond.trim();
-                // Vector similarity check: e.g., embedding SIMILAR TO 'Java Engineer'
-                if (cond.toUpperCase().contains("SIMILAR TO")) {
-                    Pattern simP = Pattern.compile("([a-zA-Z0-9_\\.]+)\\s+SIMILAR\\s+TO\\s+['\"](.*?)['\"](?:\\s+TOP\\s+(\\d+))?", Pattern.CASE_INSENSITIVE);
-                    Matcher simM = simP.matcher(cond);
-                    if (simM.find()) {
-                        String rawVecCol = simM.group(1);
-                        String vecCol = rawVecCol.contains(".") ? rawVecCol.substring(rawVecCol.lastIndexOf('.') + 1) : rawVecCol;
-                        String queryText = simM.group(2);
-                        int k = simM.group(3) != null ? Integer.parseInt(simM.group(3)) : 10;
-                        stmt.setVectorSearchCondition(new AST.VectorSearchCondition(vecCol, queryText, aiEngine.aiEmbed(queryText), k, 1.0));
+            String upperWhere = whereBody.toUpperCase();
+            if (upperWhere.contains("SIMILAR TO") || upperWhere.contains("MATCH(")) {
+                List<AST.WhereExpr> generalConjuncts = new ArrayList<>();
+                for (String cond : splitTopLevelAnd(whereBody)) {
+                    cond = cond.trim();
+                    // Vector similarity check: e.g., embedding SIMILAR TO 'Java Engineer'
+                    if (cond.toUpperCase().contains("SIMILAR TO")) {
+                        Pattern simP = Pattern.compile("([a-zA-Z0-9_\\.]+)\\s+SIMILAR\\s+TO\\s+['\"](.*?)['\"](?:\\s+TOP\\s+(\\d+))?", Pattern.CASE_INSENSITIVE);
+                        Matcher simM = simP.matcher(cond);
+                        if (simM.find()) {
+                            String rawVecCol = simM.group(1);
+                            String vecCol = rawVecCol.contains(".") ? rawVecCol.substring(rawVecCol.lastIndexOf('.') + 1) : rawVecCol;
+                            String queryText = simM.group(2);
+                            int k = simM.group(3) != null ? Integer.parseInt(simM.group(3)) : 10;
+                            stmt.setVectorSearchCondition(new AST.VectorSearchCondition(vecCol, queryText, aiEngine.aiEmbed(queryText), k, 1.0));
+                            continue;
+                        }
                     }
-                }
-                // Full text match: e.g., MATCH(bio, 'engineer')
-                else if (cond.toUpperCase().startsWith("MATCH(")) {
-                    String[] args = extractFunctionArgs(cond);
-                    String rawCol = args[0];
-                    String col = rawCol.contains(".") ? rawCol.substring(rawCol.lastIndexOf('.') + 1) : rawCol;
-                    stmt.setFullTextCondition(new AST.FullTextCondition(col, unquote(args[1])));
-                }
-                // Scalar conditions: e.g., city='Hyderabad' or age>30 or p1_0.id='test_prod_1'
-                else {
-                    Pattern scalarP = Pattern.compile("([a-zA-Z0-9_\\.]+)\\s*(>=|<=|!=|=|>|<)\\s*(.*)");
-                    Matcher scalarM = scalarP.matcher(cond);
-                    if (scalarM.find()) {
-                        String rawCol = scalarM.group(1);
+                    // Full text match: e.g., MATCH(bio, 'engineer')
+                    if (cond.toUpperCase().startsWith("MATCH(")) {
+                        String[] args = extractFunctionArgs(cond);
+                        String rawCol = args[0];
                         String col = rawCol.contains(".") ? rawCol.substring(rawCol.lastIndexOf('.') + 1) : rawCol;
-                        String op = scalarM.group(2);
-                        String val = unquote(scalarM.group(3));
-                        stmt.getWhereConditions().add(new AST.Condition(col, op, parseLiteral(val)));
+                        stmt.setFullTextCondition(new AST.FullTextCondition(col, unquote(args[1])));
+                        continue;
                     }
+                    generalConjuncts.add(WhereExprParser.parse(cond));
                 }
+                if (!generalConjuncts.isEmpty()) {
+                    AST.WhereExpr combined = generalConjuncts.size() == 1 ? generalConjuncts.get(0) : new AST.AndExpr(generalConjuncts);
+                    stmt.setWhereExpression(combined);
+                    collectTopLevelComparisonsForHints(combined, stmt.getWhereConditions());
+                }
+            } else {
+                AST.WhereExpr expr = WhereExprParser.parse(whereBody);
+                stmt.setWhereExpression(expr);
+                // Best-effort index-selection hints (e.g. primary key point lookups); this
+                // never affects correctness, only whether QueryOptimizer can pick a faster
+                // access strategy over a full scan.
+                collectTopLevelComparisonsForHints(expr, stmt.getWhereConditions());
             }
         }
 
@@ -391,7 +405,7 @@ public class SQLParser {
     }
 
     private Object parseLiteral(String val) {
-        if (val == null) return null;
+        if (val == null || "NULL".equalsIgnoreCase(val)) return null;
         try { return Integer.parseInt(val); } catch (Exception ignored) {}
         try { return Double.parseDouble(val); } catch (Exception ignored) {}
         if ("true".equalsIgnoreCase(val) || "false".equalsIgnoreCase(val)) {
@@ -419,14 +433,7 @@ public class SQLParser {
             }
         }
         if (whereBody != null && !whereBody.isBlank()) {
-            String[] conds = whereBody.split("(?i)\\s+AND\\s+");
-            for (String cond : conds) {
-                Pattern scalarP = Pattern.compile("([a-zA-Z0-9_]+)\\s*(>=|<=|!=|=|>|<)\\s*(.*)");
-                Matcher scalarM = scalarP.matcher(cond.trim());
-                if (scalarM.find()) {
-                    stmt.getWhereConditions().add(new AST.Condition(scalarM.group(1), scalarM.group(2), parseLiteral(unquote(scalarM.group(3)))));
-                }
-            }
+            stmt.setWhereExpression(WhereExprParser.parse(whereBody));
         }
         return stmt;
     }
@@ -442,15 +449,89 @@ public class SQLParser {
 
         AST.DeleteStatement stmt = new AST.DeleteStatement(tableName);
         if (whereBody != null && !whereBody.isBlank()) {
-            String[] conds = whereBody.split("(?i)\\s+AND\\s+");
-            for (String cond : conds) {
-                Pattern scalarP = Pattern.compile("([a-zA-Z0-9_]+)\\s*(>=|<=|!=|=|>|<)\\s*(.*)");
-                Matcher scalarM = scalarP.matcher(cond.trim());
-                if (scalarM.find()) {
-                    stmt.getWhereConditions().add(new AST.Condition(scalarM.group(1), scalarM.group(2), parseLiteral(unquote(scalarM.group(3)))));
-                }
-            }
+            stmt.setWhereExpression(WhereExprParser.parse(whereBody));
         }
         return stmt;
+    }
+
+    /**
+     * Splits a WHERE clause into its top-level AND'd conjuncts, honoring parentheses and
+     * quoted strings so an AND inside a nested group or a literal is never mistaken for a
+     * top-level separator. Also BETWEEN-aware: BETWEEN's own "x AND y" must not itself be
+     * treated as a splitter. Used only to carve out SIMILAR TO / MATCH(...) from the rest of
+     * the clause, which is handled by the general {@link WhereExprParser}.
+     */
+    private List<String> splitTopLevelAnd(String whereBody) {
+        List<String> segments = new ArrayList<>();
+        int depth = 0;
+        boolean inSingle = false;
+        boolean inDouble = false;
+        boolean pendingBetweenAnd = false;
+        int start = 0;
+        int i = 0;
+        while (i < whereBody.length()) {
+            char c = whereBody.charAt(i);
+            if (inSingle) {
+                if (c == '\'') inSingle = false;
+                i++;
+                continue;
+            }
+            if (inDouble) {
+                if (c == '"') inDouble = false;
+                i++;
+                continue;
+            }
+            if (c == '\'') { inSingle = true; i++; continue; }
+            if (c == '"') { inDouble = true; i++; continue; }
+            if (c == '(') { depth++; i++; continue; }
+            if (c == ')') { depth--; i++; continue; }
+
+            if (depth == 0 && isWordAt(whereBody, i, "BETWEEN")) {
+                pendingBetweenAnd = true;
+                i += "BETWEEN".length();
+                continue;
+            }
+            if (depth == 0 && isWordAt(whereBody, i, "AND")) {
+                if (pendingBetweenAnd) {
+                    pendingBetweenAnd = false; // this AND belongs to BETWEEN, not a splitter
+                } else {
+                    segments.add(whereBody.substring(start, i).trim());
+                    start = i + "AND".length();
+                }
+                i += "AND".length();
+                continue;
+            }
+            i++;
+        }
+        segments.add(whereBody.substring(start).trim());
+        return segments;
+    }
+
+    /**
+     * Walks a WHERE expression collecting bare top-level (AND-joined) comparisons as legacy
+     * {@link AST.Condition}s, for index-selection hints only (e.g. a primary key point
+     * lookup). OR/NOT/LIKE/IN/BETWEEN/IS-NULL branches are skipped: QueryOptimizer simply
+     * falls back to a full scan for those, which is always correct, just not fastest.
+     */
+    private void collectTopLevelComparisonsForHints(AST.WhereExpr expr, List<AST.Condition> out) {
+        if (expr instanceof AST.ComparisonExpr cmp) {
+            out.add(new AST.Condition(cmp.getColumn(), cmp.getOperator(), cmp.getValue()));
+        } else if (expr instanceof AST.AndExpr and) {
+            for (AST.WhereExpr operand : and.getOperands()) {
+                collectTopLevelComparisonsForHints(operand, out);
+            }
+        }
+    }
+
+    private boolean isWordAt(String s, int i, String word) {
+        int len = word.length();
+        if (i + len > s.length() || !s.regionMatches(true, i, word, 0, len)) return false;
+        boolean leftBoundary = i == 0 || !isIdentChar(s.charAt(i - 1));
+        boolean rightBoundary = i + len == s.length() || !isIdentChar(s.charAt(i + len));
+        return leftBoundary && rightBoundary;
+    }
+
+    private boolean isIdentChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_';
     }
 }

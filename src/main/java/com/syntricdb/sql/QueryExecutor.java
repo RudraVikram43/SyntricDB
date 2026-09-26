@@ -82,8 +82,8 @@ public class QueryExecutor {
         for (Transaction.PendingWrite write : txn.getPendingWrites()) {
             switch (write.type) {
                 case INSERT -> storageEngine.insert(write.database, write.table, write.tuple);
-                case UPDATE -> storageEngine.update(write.database, write.table, write.setAssignments, write.whereConditions);
-                case DELETE -> storageEngine.delete(write.database, write.table, write.whereConditions);
+                case UPDATE -> storageEngine.update(write.database, write.table, write.setAssignments, write.whereExpr);
+                case DELETE -> storageEngine.delete(write.database, write.table, write.whereExpr);
             }
         }
         transactionManager.completeTransaction(txn);
@@ -252,13 +252,13 @@ public class QueryExecutor {
             String tableName = target[1];
 
             if (activeTxn != null) {
-                int matched = countMatchingRows(targetDb, tableName, updateStmt.getWhereConditions());
-                activeTxn.addPendingWrite(Transaction.PendingWrite.forUpdate(targetDb, tableName, updateStmt.getSetAssignments(), updateStmt.getWhereConditions()));
+                int matched = countMatchingRows(targetDb, tableName, updateStmt.getWhereExpression());
+                activeTxn.addPendingWrite(Transaction.PendingWrite.forUpdate(targetDb, tableName, updateStmt.getSetAssignments(), updateStmt.getWhereExpression()));
                 long queuedElapsed = System.nanoTime() - startTime;
                 return new QueryResult(Collections.emptyList(), null, queuedElapsed, matched + " rows queued for update in table '" + targetDb + "." + tableName + "' (pending commit).", matched);
             }
 
-            int updatedRows = storageEngine.update(targetDb, tableName, updateStmt.getSetAssignments(), updateStmt.getWhereConditions());
+            int updatedRows = storageEngine.update(targetDb, tableName, updateStmt.getSetAssignments(), updateStmt.getWhereExpression());
             long elapsed = System.nanoTime() - startTime;
             return new QueryResult(Collections.emptyList(), null, elapsed, updatedRows + " rows updated in table '" + targetDb + "." + tableName + "'.", updatedRows);
         }
@@ -270,13 +270,13 @@ public class QueryExecutor {
             String tableName = target[1];
 
             if (activeTxn != null) {
-                int matched = countMatchingRows(targetDb, tableName, deleteStmt.getWhereConditions());
-                activeTxn.addPendingWrite(Transaction.PendingWrite.forDelete(targetDb, tableName, deleteStmt.getWhereConditions()));
+                int matched = countMatchingRows(targetDb, tableName, deleteStmt.getWhereExpression());
+                activeTxn.addPendingWrite(Transaction.PendingWrite.forDelete(targetDb, tableName, deleteStmt.getWhereExpression()));
                 long queuedElapsed = System.nanoTime() - startTime;
                 return new QueryResult(Collections.emptyList(), null, queuedElapsed, matched + " rows queued for delete from table '" + targetDb + "." + tableName + "' (pending commit).", matched);
             }
 
-            int deletedRows = storageEngine.delete(targetDb, tableName, deleteStmt.getWhereConditions());
+            int deletedRows = storageEngine.delete(targetDb, tableName, deleteStmt.getWhereExpression());
             long elapsed = System.nanoTime() - startTime;
             return new QueryResult(Collections.emptyList(), null, elapsed, deletedRows + " rows deleted from table '" + targetDb + "." + tableName + "'.", deletedRows);
         }
@@ -364,10 +364,11 @@ public class QueryExecutor {
                     break;
             }
 
-            // Apply WHERE scalar filtering pushdown
+            // Apply WHERE filtering pushdown (AND/OR/NOT/LIKE/IN/BETWEEN/IS NULL, uniformly
+            // regardless of which access strategy produced the candidates above)
             List<Tuple> filtered = new ArrayList<>();
             for (Tuple tuple : candidateTuples) {
-                if (matchesWhereConditions(tuple, selectStmt.getWhereConditions())) {
+                if (WhereEvaluator.matches(tuple, selectStmt.getWhereExpression())) {
                     filtered.add(tuple);
                 }
             }
@@ -441,49 +442,13 @@ public class QueryExecutor {
     }
 
     /** Counts rows an UPDATE/DELETE would touch, without mutating the storage engine. */
-    private int countMatchingRows(String db, String table, List<AST.Condition> conditions) throws Exception {
+    private int countMatchingRows(String db, String table, AST.WhereExpr whereExpr) throws Exception {
         int count = 0;
         for (Tuple tuple : storageEngine.scanAll(db, table)) {
-            if (matchesWhereConditions(tuple, conditions)) {
+            if (WhereEvaluator.matches(tuple, whereExpr)) {
                 count++;
             }
         }
         return count;
-    }
-
-    private boolean matchesWhereConditions(Tuple tuple, List<AST.Condition> conditions) {
-        for (AST.Condition cond : conditions) {
-            Object actualVal = tuple.get(cond.getColumn());
-            if (actualVal == null) return false;
-            Object targetVal = cond.getValue();
-
-            switch (cond.getOperator()) {
-                case "=":
-                    if (!actualVal.toString().equalsIgnoreCase(targetVal.toString())) return false;
-                    break;
-                case "!=":
-                    if (actualVal.toString().equalsIgnoreCase(targetVal.toString())) return false;
-                    break;
-                case ">":
-                    if (!(compareNumbers(actualVal, targetVal) > 0)) return false;
-                    break;
-                case "<":
-                    if (!(compareNumbers(actualVal, targetVal) < 0)) return false;
-                    break;
-                case ">=":
-                    if (!(compareNumbers(actualVal, targetVal) >= 0)) return false;
-                    break;
-                case "<=":
-                    if (!(compareNumbers(actualVal, targetVal) <= 0)) return false;
-                    break;
-            }
-        }
-        return true;
-    }
-
-    private int compareNumbers(Object n1, Object n2) {
-        double d1 = n1 instanceof Number ? ((Number) n1).doubleValue() : Double.parseDouble(n1.toString());
-        double d2 = n2 instanceof Number ? ((Number) n2).doubleValue() : Double.parseDouble(n2.toString());
-        return Double.compare(d1, d2);
     }
 }

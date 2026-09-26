@@ -50,6 +50,7 @@ public class AST {
         private final String tableName;
         private final List<SelectItem> selectItems = new ArrayList<>();
         private final List<Condition> whereConditions = new ArrayList<>();
+        private WhereExpr whereExpression;
         private VectorSearchCondition vectorSearchCondition;
         private FullTextCondition fullTextCondition;
         private String orderByColumn;
@@ -62,7 +63,11 @@ public class AST {
 
         public String getTableName() { return tableName; }
         public List<SelectItem> getSelectItems() { return selectItems; }
+        /** Flat top-level AND'd equality/comparison conditions, for index-selection hints only. */
         public List<Condition> getWhereConditions() { return whereConditions; }
+        /** The full WHERE expression (AND/OR/NOT/LIKE/IN/BETWEEN/IS NULL/parens) used for actual row filtering. */
+        public WhereExpr getWhereExpression() { return whereExpression; }
+        public void setWhereExpression(WhereExpr whereExpression) { this.whereExpression = whereExpression; }
         public VectorSearchCondition getVectorSearchCondition() { return vectorSearchCondition; }
         public void setVectorSearchCondition(VectorSearchCondition v) { this.vectorSearchCondition = v; }
         public FullTextCondition getFullTextCondition() { return fullTextCondition; }
@@ -112,6 +117,112 @@ public class AST {
         public String getColumn() { return column; }
         public String getOperator() { return operator; }
         public Object getValue() { return value; }
+    }
+
+    /**
+     * A general boolean WHERE-clause expression tree: AND/OR/NOT of comparisons, LIKE,
+     * IN, BETWEEN, and IS [NOT] NULL, with parentheses for grouping. Evaluated uniformly
+     * against a row by {@link WhereEvaluator}, regardless of which database, table, or
+     * access strategy (full scan, primary key, HNSW, inverted index) produced it.
+     */
+    public interface WhereExpr {}
+
+    public static class ComparisonExpr implements WhereExpr {
+        private final String column;
+        private final String operator; // =, !=, >, <, >=, <=
+        private final Object value;
+
+        public ComparisonExpr(String column, String operator, Object value) {
+            this.column = column.toLowerCase();
+            this.operator = operator;
+            this.value = value;
+        }
+
+        public String getColumn() { return column; }
+        public String getOperator() { return operator; }
+        public Object getValue() { return value; }
+    }
+
+    public static class LikeExpr implements WhereExpr {
+        private final String column;
+        private final String pattern;
+        private final boolean negated;
+
+        public LikeExpr(String column, String pattern, boolean negated) {
+            this.column = column.toLowerCase();
+            this.pattern = pattern;
+            this.negated = negated;
+        }
+
+        public String getColumn() { return column; }
+        public String getPattern() { return pattern; }
+        public boolean isNegated() { return negated; }
+    }
+
+    public static class InExpr implements WhereExpr {
+        private final String column;
+        private final List<Object> values;
+        private final boolean negated;
+
+        public InExpr(String column, List<Object> values, boolean negated) {
+            this.column = column.toLowerCase();
+            this.values = values;
+            this.negated = negated;
+        }
+
+        public String getColumn() { return column; }
+        public List<Object> getValues() { return values; }
+        public boolean isNegated() { return negated; }
+    }
+
+    public static class BetweenExpr implements WhereExpr {
+        private final String column;
+        private final Object low;
+        private final Object high;
+        private final boolean negated;
+
+        public BetweenExpr(String column, Object low, Object high, boolean negated) {
+            this.column = column.toLowerCase();
+            this.low = low;
+            this.high = high;
+            this.negated = negated;
+        }
+
+        public String getColumn() { return column; }
+        public Object getLow() { return low; }
+        public Object getHigh() { return high; }
+        public boolean isNegated() { return negated; }
+    }
+
+    public static class IsNullExpr implements WhereExpr {
+        private final String column;
+        private final boolean negated; // true = IS NOT NULL
+
+        public IsNullExpr(String column, boolean negated) {
+            this.column = column.toLowerCase();
+            this.negated = negated;
+        }
+
+        public String getColumn() { return column; }
+        public boolean isNegated() { return negated; }
+    }
+
+    public static class AndExpr implements WhereExpr {
+        private final List<WhereExpr> operands;
+        public AndExpr(List<WhereExpr> operands) { this.operands = operands; }
+        public List<WhereExpr> getOperands() { return operands; }
+    }
+
+    public static class OrExpr implements WhereExpr {
+        private final List<WhereExpr> operands;
+        public OrExpr(List<WhereExpr> operands) { this.operands = operands; }
+        public List<WhereExpr> getOperands() { return operands; }
+    }
+
+    public static class NotExpr implements WhereExpr {
+        private final WhereExpr operand;
+        public NotExpr(WhereExpr operand) { this.operand = operand; }
+        public WhereExpr getOperand() { return operand; }
     }
 
     public static class VectorSearchCondition {
@@ -211,7 +322,7 @@ public class AST {
     public static class UpdateStatement implements Statement {
         private final String tableName;
         private final Map<String, Object> setAssignments = new LinkedHashMap<>();
-        private final List<Condition> whereConditions = new ArrayList<>();
+        private WhereExpr whereExpression;
 
         public UpdateStatement(String tableName) {
             this.tableName = tableName.toLowerCase();
@@ -224,19 +335,21 @@ public class AST {
 
         public String getTableName() { return tableName; }
         public Map<String, Object> getSetAssignments() { return setAssignments; }
-        public List<Condition> getWhereConditions() { return whereConditions; }
+        public WhereExpr getWhereExpression() { return whereExpression; }
+        public void setWhereExpression(WhereExpr whereExpression) { this.whereExpression = whereExpression; }
     }
 
     public static class DeleteStatement implements Statement {
         private final String tableName;
-        private final List<Condition> whereConditions = new ArrayList<>();
+        private WhereExpr whereExpression;
 
         public DeleteStatement(String tableName) {
             this.tableName = tableName.toLowerCase();
         }
 
         public String getTableName() { return tableName; }
-        public List<Condition> getWhereConditions() { return whereConditions; }
+        public WhereExpr getWhereExpression() { return whereExpression; }
+        public void setWhereExpression(WhereExpr whereExpression) { this.whereExpression = whereExpression; }
     }
 }
 
