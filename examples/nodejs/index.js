@@ -9,7 +9,9 @@ function parseConnectionUrl(connStr) {
         const authStr = `${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`;
         headers['Authorization'] = `Basic ${Buffer.from(authStr, 'utf-8').toString('base64')}`;
     }
-    const database = parsed.pathname ? parsed.pathname.replace(/^\//, '') : 'default';
+    // A URL with no database segment still yields pathname "/" (never ""), so the
+    // slash(es) must be stripped before checking for "no database given".
+    const database = parsed.pathname.replace(/^\/|\/$/g, '') || 'default';
     return { apiUrl: host, headers, database };
 }
 

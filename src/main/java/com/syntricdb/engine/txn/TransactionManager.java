@@ -81,4 +81,21 @@ public class TransactionManager {
     public Transaction getTransaction(long txnId) {
         return activeTransactions.get(txnId);
     }
+
+    /**
+     * Marks a transaction committed once its {@link Transaction.PendingWrite} list has
+     * already been applied to the storage engine by the caller (see
+     * {@code QueryExecutor.commitTransaction}). Unlike {@link #commitTransaction}, this
+     * does not do write-write conflict detection since the caller already replayed the
+     * writes sequentially and in order.
+     */
+    public synchronized void completeTransaction(Transaction txn) {
+        if (txn.getState() != Transaction.TxnState.ACTIVE) {
+            return;
+        }
+        txn.setState(Transaction.TxnState.COMMITTED);
+        globalTimestamp.incrementAndGet();
+        activeTransactions.remove(txn.getTxnId());
+        log.info("Committed Transaction [TxnID={}] ({} operations applied)", txn.getTxnId(), txn.getPendingWrites().size());
+    }
 }

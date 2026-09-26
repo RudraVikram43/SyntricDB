@@ -78,7 +78,7 @@ public class PGWireServerHandler extends SimpleChannelInboundHandler<ByteBuf> {
                     String descName = body.readableBytes() > 0 ? readString(body) : "";
                     log.debug("PGWire Describe type '{}' name '{}'", (char) descType, descName);
                     String q = portals.getOrDefault(descName, preparedStatements.getOrDefault(descName, ""));
-                    if (!q.isEmpty()) {
+                    if (!q.isEmpty() && isReadOnlyQuery(q)) {
                         try {
                             QueryExecutor.QueryResult res = queryExecutor.execute(q);
                             if (res.getRows() != null && !res.getRows().isEmpty()) {
@@ -165,6 +165,16 @@ public class PGWireServerHandler extends SimpleChannelInboundHandler<ByteBuf> {
         sendReadyForQuery(ctx);
         ctx.flush();
         authenticated = true;
+    }
+
+    /**
+     * Describe must not have side effects, so it may only pre-execute statements that are
+     * inherently read-only. Mutating statements (INSERT/UPDATE/DELETE/...) get their column
+     * metadata skipped here and are executed exactly once, later, on 'Execute'.
+     */
+    private boolean isReadOnlyQuery(String sql) {
+        String upper = sql.trim().toUpperCase();
+        return upper.startsWith("SELECT") || upper.startsWith("SHOW");
     }
 
     private String bindParameters(String stmtName, ByteBuf body) {

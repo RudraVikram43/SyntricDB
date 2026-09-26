@@ -22,6 +22,7 @@ public class SyntricConnection implements Connection {
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private boolean closed = false;
     private boolean autoCommit = true;
+    private Long txnId = null;
 
     public SyntricConnection(String host, int port, String database, String username, String password) throws SQLException {
         this.host = host != null && !host.isEmpty() ? host : "localhost";
@@ -133,6 +134,19 @@ public class SyntricConnection implements Connection {
 
     @Override
     public void setAutoCommit(boolean autoCommit) throws SQLException {
+        checkClosed();
+        if (this.autoCommit == autoCommit) {
+            return;
+        }
+        if (!autoCommit) {
+            // Entering manual-commit mode: subsequent INSERT/UPDATE/DELETE statements are
+            // queued server-side under this transaction until commit()/rollback() is called.
+            beginTxn();
+        } else if (txnId != null) {
+            // Per the Connection.setAutoCommit javadoc, switching back to auto-commit
+            // commits whatever transaction was open.
+            commit();
+        }
         this.autoCommit = autoCommit;
     }
 
@@ -140,13 +154,53 @@ public class SyntricConnection implements Connection {
     public boolean getAutoCommit() throws SQLException { return autoCommit; }
 
     @Override
-    public void commit() throws SQLException { checkClosed(); }
+    public void commit() throws SQLException {
+        checkClosed();
+        if (txnId != null) {
+            executeApiCall("/api/transaction/commit", Map.of("txnId", txnId));
+            txnId = null;
+            if (!autoCommit) {
+                beginTxn();
+            }
+        }
+    }
 
     @Override
-    public void rollback() throws SQLException { checkClosed(); }
+    public void rollback() throws SQLException {
+        checkClosed();
+        if (txnId != null) {
+            executeApiCall("/api/transaction/rollback", Map.of("txnId", txnId));
+            txnId = null;
+            if (!autoCommit) {
+                beginTxn();
+            }
+        }
+    }
+
+    private void beginTxn() throws SQLException {
+        Map<String, Object> res = executeApiCall("/api/transaction/begin", Map.of());
+        Object id = res.get("txnId");
+        if (id == null) {
+            throw new SQLException("SyntricDB server did not return a transaction id for BEGIN.");
+        }
+        this.txnId = ((Number) id).longValue();
+    }
+
+    /** The in-flight transaction id statements should be queued under, or null in auto-commit mode. */
+    public Long getActiveTransactionId() {
+        return autoCommit ? null : txnId;
+    }
 
     @Override
     public void close() throws SQLException {
+        if (!closed && txnId != null) {
+            try {
+                // Connection.close() javadoc: an open transaction is implicitly rolled back.
+                executeApiCall("/api/transaction/rollback", Map.of("txnId", txnId));
+            } catch (SQLException ignored) {
+                // Best-effort: the connection is going away regardless.
+            }
+        }
         this.closed = true;
     }
 

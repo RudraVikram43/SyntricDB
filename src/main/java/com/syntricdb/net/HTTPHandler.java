@@ -205,25 +205,45 @@ public class HTTPHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
                 Map<String, Object> reqJson = jsonMapper.readValue(body, Map.class);
                 String sql = reqJson.get("sql").toString();
                 String targetDb = reqJson.containsKey("database") ? reqJson.get("database").toString() : queryExecutor.getActiveDatabase();
-                QueryExecutor.QueryResult res = queryExecutor.execute(sql, targetDb);
+                Long txnId = reqJson.containsKey("txnId") ? ((Number) reqJson.get("txnId")).longValue() : null;
+                QueryExecutor.QueryResult res = queryExecutor.execute(sql, targetDb, txnId);
 
-                boolean isSelect = sql.trim().toUpperCase().startsWith("SELECT");
-                int affected = isSelect ? 0 : 1;
+                boolean returnsRows = res.returnsRows();
+                int affected = returnsRows ? 0 : res.getAffectedRows();
 
                 responseMap.put("success", true);
                 responseMap.put("activeDatabase", queryExecutor.getActiveDatabase());
                 responseMap.put("message", res.getMessage());
                 responseMap.put("executionTimeMs", res.getExecutionTimeMs());
                 responseMap.put("affectedRows", affected);
-                responseMap.put("rowCount", isSelect ? res.getRows().size() : affected);
+                responseMap.put("rowCount", returnsRows ? res.getRows().size() : affected);
                 if (res.getExecutionPlan() != null) {
                     responseMap.put("planStrategy", res.getExecutionPlan().getStrategy().name());
                     responseMap.put("planDescription", res.getExecutionPlan().getDescription());
                     responseMap.put("estimatedCost", res.getExecutionPlan().getEstimatedCost());
                 }
-                if (isSelect) {
+                if (returnsRows) {
                     responseMap.put("data", res.getRows());
                 }
+
+            } else if ("/api/transaction/begin".equals(uri) && req.method() == HttpMethod.POST) {
+                long txnId = queryExecutor.beginTransaction();
+                responseMap.put("success", true);
+                responseMap.put("txnId", txnId);
+
+            } else if ("/api/transaction/commit".equals(uri) && req.method() == HttpMethod.POST) {
+                Map<String, Object> reqJson = jsonMapper.readValue(body, Map.class);
+                long txnId = ((Number) reqJson.get("txnId")).longValue();
+                queryExecutor.commitTransaction(txnId);
+                responseMap.put("success", true);
+                responseMap.put("message", "Transaction " + txnId + " committed.");
+
+            } else if ("/api/transaction/rollback".equals(uri) && req.method() == HttpMethod.POST) {
+                Map<String, Object> reqJson = jsonMapper.readValue(body, Map.class);
+                long txnId = ((Number) reqJson.get("txnId")).longValue();
+                queryExecutor.rollbackTransaction(txnId);
+                responseMap.put("success", true);
+                responseMap.put("message", "Transaction " + txnId + " rolled back.");
 
             } else if ("/api/vector/search".equals(uri) && req.method() == HttpMethod.POST) {
                 Map<String, Object> reqJson = jsonMapper.readValue(body, Map.class);

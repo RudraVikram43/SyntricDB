@@ -46,6 +46,10 @@ public class SyntricStatement implements Statement {
         Map<String, Object> reqBody = new LinkedHashMap<>();
         reqBody.put("sql", sql);
         reqBody.put("database", connection.getDatabase());
+        Long txnId = connection.getActiveTransactionId();
+        if (txnId != null) {
+            reqBody.put("txnId", txnId);
+        }
 
         Map<String, Object> responseMap = connection.executeApiCall("/api/sql", reqBody);
 
@@ -55,14 +59,17 @@ public class SyntricStatement implements Statement {
             throw new SQLException("SyntricDB Error: " + err);
         }
 
-        List<Map<String, Object>> data = (List<Map<String, Object>>) responseMap.get("data");
-        if (data != null && !data.isEmpty()) {
-            List<String> columns = new ArrayList<>(data.get(0).keySet());
+        if (responseMap.containsKey("data")) {
+            List<Map<String, Object>> data = (List<Map<String, Object>>) responseMap.get("data");
+            if (data == null) {
+                data = Collections.emptyList();
+            }
+            List<String> columns = data.isEmpty() ? Collections.emptyList() : new ArrayList<>(data.get(0).keySet());
             this.currentResultSet = new SyntricResultSet(data, columns);
             return true;
         } else {
-            Number rowCount = (Number) responseMap.get("rowCount");
-            this.updateCount = rowCount != null ? rowCount.intValue() : 0;
+            Number affectedRows = (Number) responseMap.getOrDefault("affectedRows", responseMap.get("rowCount"));
+            this.updateCount = affectedRows != null ? affectedRows.intValue() : 0;
             return false;
         }
     }

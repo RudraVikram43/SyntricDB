@@ -51,4 +51,36 @@ public class SQLParserTest {
         assertEquals("bio", select.getFullTextCondition().getColumn());
         assertEquals("vector search", select.getFullTextCondition().getQueryText());
     }
+
+    @Test
+    public void testParseSelectWithTableAlias() throws Exception {
+        AST.Statement stmt = parser.parse("SELECT p1_0.id, p1_0.name FROM products p1_0 WHERE p1_0.id = 'x'");
+        assertTrue(stmt instanceof AST.SelectStatement);
+
+        AST.SelectStatement select = (AST.SelectStatement) stmt;
+        assertEquals("products", select.getTableName());
+        assertEquals("id", select.getSelectItems().get(0).getColumnName());
+        assertEquals("name", select.getSelectItems().get(1).getColumnName());
+        assertEquals("id", select.getWhereConditions().get(0).getColumn());
+    }
+
+    @Test
+    public void testParseSelectWithAsAlias() throws Exception {
+        AST.Statement stmt = parser.parse("SELECT * FROM products AS p");
+        assertTrue(stmt instanceof AST.SelectStatement);
+        assertEquals("products", ((AST.SelectStatement) stmt).getTableName());
+    }
+
+    @Test
+    public void testParseSelectRejectsMalformedTrailingClause() {
+        assertThrows(IllegalArgumentException.class, () -> parser.parse("SELECT * FROM users LIMT 5"));
+        assertThrows(IllegalArgumentException.class, () -> parser.parse("SELECT * FROM users garbage tokens"));
+    }
+
+    @Test
+    public void testParseSelectPreservesDecimalLiteralInSelectList() throws Exception {
+        AST.Statement stmt = parser.parse("SELECT price * 1.5 AS total FROM products");
+        assertTrue(stmt instanceof AST.SelectStatement);
+        assertEquals("price * 1.5 AS total", ((AST.SelectStatement) stmt).getSelectItems().get(0).getColumnName());
+    }
 }

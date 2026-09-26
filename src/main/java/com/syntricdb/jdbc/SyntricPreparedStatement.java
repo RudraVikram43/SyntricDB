@@ -5,7 +5,9 @@ import java.io.Reader;
 import java.math.BigDecimal;
 import java.net.URL;
 import java.sql.*;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,9 +33,13 @@ public class SyntricPreparedStatement extends SyntricStatement implements Prepar
         if (sql.contains("?")) {
             StringBuilder sb = new StringBuilder();
             int paramIndex = 1;
+            boolean inString = false;
             for (int i = 0; i < sql.length(); i++) {
                 char c = sql.charAt(i);
-                if (c == '?') {
+                if (c == '\'') {
+                    inString = !inString;
+                    sb.append(c);
+                } else if (c == '?' && !inString) {
                     String val = parameters.getOrDefault(paramIndex++, "NULL");
                     sb.append(val);
                 } else {
@@ -43,9 +49,12 @@ public class SyntricPreparedStatement extends SyntricStatement implements Prepar
             return sb.toString();
         }
 
-        for (Map.Entry<Integer, String> entry : parameters.entrySet()) {
-            String marker = "$" + entry.getKey();
-            sql = sql.replace(marker, entry.getValue());
+        // Replace longest markers first ($10 before $1) so a shorter marker can't
+        // match as a substring prefix of a longer one.
+        List<Integer> keys = new ArrayList<>(parameters.keySet());
+        keys.sort(Comparator.<Integer>naturalOrder().reversed());
+        for (Integer key : keys) {
+            sql = sql.replace("$" + key, parameters.get(key));
         }
 
         return sql;
@@ -125,7 +134,7 @@ public class SyntricPreparedStatement extends SyntricStatement implements Prepar
         if (x == null) {
             parameters.put(parameterIndex, "NULL");
         } else {
-            parameters.put(parameterIndex, "'" + new String(x) + "'");
+            parameters.put(parameterIndex, "'" + new String(x).replace("'", "''") + "'");
         }
     }
 

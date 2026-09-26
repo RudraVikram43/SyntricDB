@@ -24,7 +24,9 @@ fn parse_connection_url(url_str: &str) -> (String, Option<(String, String)>, Str
             None
         };
 
-        let db = u.path().trim_start_matches('/');
+        // Trim both ends: a trailing slash (e.g. ".../default/") must not become part
+        // of the database name.
+        let db = u.path().trim_matches('/');
         let database = if db.is_empty() { "default" } else { db };
 
         (api_url, auth, database.to_string())

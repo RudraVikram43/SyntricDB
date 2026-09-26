@@ -4,6 +4,8 @@ import com.syntricdb.ai.AIEngine;
 import com.syntricdb.engine.StorageEngine;
 import com.syntricdb.engine.fulltext.InvertedIndex;
 import com.syntricdb.engine.schema.*;
+import com.syntricdb.engine.txn.Transaction;
+import com.syntricdb.engine.txn.TransactionManager;
 import com.syntricdb.engine.vector.HNSWIndex;
 
 import java.util.*;
@@ -13,25 +15,33 @@ public class QueryExecutor {
     private final AIEngine aiEngine;
     private final QueryOptimizer optimizer;
     private final SQLParser parser;
+    private final TransactionManager transactionManager = new TransactionManager();
     private String activeDatabase = StorageEngine.DEFAULT_DB;
 
     public static class QueryResult {
+        /** Sentinel for {@link #affectedRows}: this statement returns row data rather than a DML row count. */
+        public static final int RETURNS_ROWS = -1;
+
         private final List<Map<String, Object>> rows;
         private final ExecutionPlan executionPlan;
         private final long executionTimeNs;
         private final String message;
+        private final int affectedRows;
 
-        public QueryResult(List<Map<String, Object>> rows, ExecutionPlan executionPlan, long executionTimeNs, String message) {
+        public QueryResult(List<Map<String, Object>> rows, ExecutionPlan executionPlan, long executionTimeNs, String message, int affectedRows) {
             this.rows = rows;
             this.executionPlan = executionPlan;
             this.executionTimeNs = executionTimeNs;
             this.message = message;
+            this.affectedRows = affectedRows;
         }
 
         public List<Map<String, Object>> getRows() { return rows; }
         public ExecutionPlan getExecutionPlan() { return executionPlan; }
         public double getExecutionTimeMs() { return executionTimeNs / 1_000_000.0; }
         public String getMessage() { return message; }
+        public int getAffectedRows() { return affectedRows; }
+        public boolean returnsRows() { return affectedRows == RETURNS_ROWS; }
         public List<String> getColumns() {
             if (rows == null || rows.isEmpty()) return Collections.emptyList();
             return new ArrayList<>(rows.get(0).keySet());
@@ -55,41 +65,83 @@ public class QueryExecutor {
         }
     }
 
+    /**
+     * Starts a new transaction. Until {@link #commitTransaction} is called, INSERT/UPDATE/DELETE
+     * statements run with this id (via {@link #execute(String, String, Long)}) are only queued,
+     * never applied to the storage engine — so {@link #rollbackTransaction} is a true no-op
+     * discard, not an undo. DDL and SELECT are unaffected by transaction state: they run
+     * immediately and see only already-committed data (no read-your-own-writes within the
+     * same transaction).
+     */
+    public long beginTransaction() {
+        return transactionManager.beginTransaction().getTxnId();
+    }
+
+    public void commitTransaction(long txnId) throws Exception {
+        Transaction txn = requireActiveTransaction(txnId);
+        for (Transaction.PendingWrite write : txn.getPendingWrites()) {
+            switch (write.type) {
+                case INSERT -> storageEngine.insert(write.database, write.table, write.tuple);
+                case UPDATE -> storageEngine.update(write.database, write.table, write.setAssignments, write.whereConditions);
+                case DELETE -> storageEngine.delete(write.database, write.table, write.whereConditions);
+            }
+        }
+        transactionManager.completeTransaction(txn);
+    }
+
+    public void rollbackTransaction(long txnId) {
+        Transaction txn = transactionManager.getTransaction(txnId);
+        if (txn != null) {
+            transactionManager.abortTransaction(txn);
+        }
+    }
+
+    private Transaction requireActiveTransaction(long txnId) {
+        Transaction txn = transactionManager.getTransaction(txnId);
+        if (txn == null || txn.getState() != Transaction.TxnState.ACTIVE) {
+            throw new IllegalArgumentException("Transaction " + txnId + " is not active or does not exist.");
+        }
+        return txn;
+    }
+
     public QueryResult execute(String sql) throws Exception {
-        return execute(sql, this.activeDatabase);
+        return execute(sql, this.activeDatabase, null);
     }
 
     public QueryResult execute(String sql, String dbContext) throws Exception {
+        return execute(sql, dbContext, null);
+    }
+
+    public QueryResult execute(String sql, String dbContext, Long txnId) throws Exception {
         long startTime = System.nanoTime();
         AST.Statement stmt = parser.parse(sql);
         String currentDb = (dbContext != null && !dbContext.isBlank()) ? dbContext.toLowerCase() : this.activeDatabase;
-
-        if (sql != null && sql.toUpperCase().contains("TRANSACTION ISOLATION")) {
-            List<Map<String, Object>> rows = new ArrayList<>();
-            Map<String, Object> r = new LinkedHashMap<>();
-            r.put("transaction_isolation", "read committed");
-            rows.add(r);
-            long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(rows, null, elapsed, "read committed");
-        }
+        Transaction activeTxn = (txnId != null) ? requireActiveTransaction(txnId) : null;
 
         if (stmt instanceof AST.SetStatement || stmt instanceof AST.NoOpStatement) {
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "OK");
+            if (sql != null && sql.toUpperCase().contains("TRANSACTION ISOLATION")) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("transaction_isolation", "read committed");
+                rows.add(r);
+                return new QueryResult(rows, null, elapsed, "read committed", QueryResult.RETURNS_ROWS);
+            }
+            return new QueryResult(Collections.emptyList(), null, elapsed, "OK", 0);
         }
 
         if (stmt instanceof AST.CreateDatabaseStatement) {
             AST.CreateDatabaseStatement createDb = (AST.CreateDatabaseStatement) stmt;
             storageEngine.createDatabase(createDb.getDbName());
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "Database '" + createDb.getDbName() + "' created successfully.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, "Database '" + createDb.getDbName() + "' created successfully.", 0);
         }
 
         if (stmt instanceof AST.DropDatabaseStatement) {
             AST.DropDatabaseStatement dropDb = (AST.DropDatabaseStatement) stmt;
             storageEngine.dropDatabase(dropDb.getDbName());
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "Database '" + dropDb.getDbName() + "' dropped successfully.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, "Database '" + dropDb.getDbName() + "' dropped successfully.", 0);
         }
 
         if (stmt instanceof AST.UseDatabaseStatement) {
@@ -97,7 +149,7 @@ public class QueryExecutor {
             storageEngine.getOrCreateDatabase(useDb.getDbName());
             this.activeDatabase = useDb.getDbName();
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "Switched to database '" + useDb.getDbName() + "'.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, "Switched to database '" + useDb.getDbName() + "'.", 0);
         }
 
         if (stmt instanceof AST.ShowDatabasesStatement) {
@@ -110,7 +162,7 @@ public class QueryExecutor {
                 rows.add(r);
             }
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(rows, null, elapsed, "Listed " + dbs.size() + " databases.");
+            return new QueryResult(rows, null, elapsed, "Listed " + dbs.size() + " databases.", QueryResult.RETURNS_ROWS);
         }
 
         if (stmt instanceof AST.ShowTablesStatement) {
@@ -128,7 +180,7 @@ public class QueryExecutor {
                 rows.add(r);
             }
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(rows, null, elapsed, "Listed " + schemas.size() + " tables in database '" + targetDb + "'.");
+            return new QueryResult(rows, null, elapsed, "Listed " + schemas.size() + " tables in database '" + targetDb + "'.", QueryResult.RETURNS_ROWS);
         }
 
         if (stmt instanceof AST.CreateTableStatement) {
@@ -143,7 +195,7 @@ public class QueryExecutor {
             }
             storageEngine.createTable(targetDb, schema);
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "Table '" + targetDb + "." + tableName + "' created successfully.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, "Table '" + targetDb + "." + tableName + "' created successfully.", 0);
         }
 
         if (stmt instanceof AST.InsertStatement) {
@@ -175,16 +227,22 @@ public class QueryExecutor {
                 alignedTuple.set(col.getName(), val);
             }
 
+            if (activeTxn != null) {
+                activeTxn.addPendingWrite(Transaction.PendingWrite.forInsert(targetDb, tableName, alignedTuple));
+                long queuedElapsed = System.nanoTime() - startTime;
+                return new QueryResult(Collections.emptyList(), null, queuedElapsed, "1 row queued for insert into '" + targetDb + "." + tableName + "' (pending commit).", 1);
+            }
+
             storageEngine.insert(targetDb, tableName, alignedTuple);
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "1 row inserted successfully into '" + targetDb + "." + tableName + "'.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, "1 row inserted successfully into '" + targetDb + "." + tableName + "'.", 1);
         }
 
         if (stmt instanceof AST.StreamPublishStatement) {
             AST.StreamPublishStatement pub = (AST.StreamPublishStatement) stmt;
             storageEngine.getStreamEngine().publish(pub.getTopic(), pub.getPayload());
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, "Message published to stream topic '" + pub.getTopic() + "'.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, "Message published to stream topic '" + pub.getTopic() + "'.", 0);
         }
 
         if (stmt instanceof AST.UpdateStatement) {
@@ -193,9 +251,16 @@ public class QueryExecutor {
             String targetDb = target[0];
             String tableName = target[1];
 
+            if (activeTxn != null) {
+                int matched = countMatchingRows(targetDb, tableName, updateStmt.getWhereConditions());
+                activeTxn.addPendingWrite(Transaction.PendingWrite.forUpdate(targetDb, tableName, updateStmt.getSetAssignments(), updateStmt.getWhereConditions()));
+                long queuedElapsed = System.nanoTime() - startTime;
+                return new QueryResult(Collections.emptyList(), null, queuedElapsed, matched + " rows queued for update in table '" + targetDb + "." + tableName + "' (pending commit).", matched);
+            }
+
             int updatedRows = storageEngine.update(targetDb, tableName, updateStmt.getSetAssignments(), updateStmt.getWhereConditions());
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, updatedRows + " rows updated in table '" + targetDb + "." + tableName + "'.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, updatedRows + " rows updated in table '" + targetDb + "." + tableName + "'.", updatedRows);
         }
 
         if (stmt instanceof AST.DeleteStatement) {
@@ -204,9 +269,16 @@ public class QueryExecutor {
             String targetDb = target[0];
             String tableName = target[1];
 
+            if (activeTxn != null) {
+                int matched = countMatchingRows(targetDb, tableName, deleteStmt.getWhereConditions());
+                activeTxn.addPendingWrite(Transaction.PendingWrite.forDelete(targetDb, tableName, deleteStmt.getWhereConditions()));
+                long queuedElapsed = System.nanoTime() - startTime;
+                return new QueryResult(Collections.emptyList(), null, queuedElapsed, matched + " rows queued for delete from table '" + targetDb + "." + tableName + "' (pending commit).", matched);
+            }
+
             int deletedRows = storageEngine.delete(targetDb, tableName, deleteStmt.getWhereConditions());
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(Collections.emptyList(), null, elapsed, deletedRows + " rows deleted from table '" + targetDb + "." + tableName + "'.");
+            return new QueryResult(Collections.emptyList(), null, elapsed, deletedRows + " rows deleted from table '" + targetDb + "." + tableName + "'.", deletedRows);
         }
 
 
@@ -217,7 +289,7 @@ public class QueryExecutor {
                 String prompt = selectStmt.getSelectItems().isEmpty() ? "" : selectStmt.getSelectItems().get(0).getColumnName();
                 r.put("AI_RAG", "[SyntricDB RAG Answer]: SyntricDB in-engine LLM response for: " + prompt);
                 long elapsed = System.nanoTime() - startTime;
-                return new QueryResult(List.of(r), null, elapsed, "1 row returned.");
+                return new QueryResult(List.of(r), null, elapsed, "1 row returned.", QueryResult.RETURNS_ROWS);
             }
 
             String[] target = resolveDbAndTable(selectStmt.getTableName(), currentDb);
@@ -353,7 +425,7 @@ public class QueryExecutor {
             }
 
             long elapsed = System.nanoTime() - startTime;
-            return new QueryResult(outputRows, plan, elapsed, "Query executed successfully on database '" + targetDb + "'. " + outputRows.size() + " rows returned.");
+            return new QueryResult(outputRows, plan, elapsed, "Query executed successfully on database '" + targetDb + "'. " + outputRows.size() + " rows returned.", QueryResult.RETURNS_ROWS);
         }
 
         throw new IllegalArgumentException("Unknown SQL statement.");
@@ -366,6 +438,17 @@ public class QueryExecutor {
             return new String[]{ parts[0].toLowerCase(), parts[1].toLowerCase() };
         }
         return new String[]{ fallbackDb != null ? fallbackDb.toLowerCase() : StorageEngine.DEFAULT_DB, rawName.toLowerCase() };
+    }
+
+    /** Counts rows an UPDATE/DELETE would touch, without mutating the storage engine. */
+    private int countMatchingRows(String db, String table, List<AST.Condition> conditions) throws Exception {
+        int count = 0;
+        for (Tuple tuple : storageEngine.scanAll(db, table)) {
+            if (matchesWhereConditions(tuple, conditions)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private boolean matchesWhereConditions(Tuple tuple, List<AST.Condition> conditions) {

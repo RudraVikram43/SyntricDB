@@ -222,7 +222,18 @@ public class SQLParser {
 
         String selectBody = m.group(1).trim();
         String rawTable = m.group(2).trim();
-        String tableName = rawTable.split("\\s+")[0].trim();
+        String[] tableParts = rawTable.split("\\s+");
+        String tableName = tableParts[0].trim();
+        if (tableParts.length > 1) {
+            // Only a bare alias ("users u") or an "AS"-qualified alias ("users AS u") may
+            // follow the table name; anything else is malformed SQL that must not be
+            // silently discarded (e.g. a typo'd trailing clause).
+            boolean validAlias = (tableParts.length == 2 && tableParts[1].matches("[a-zA-Z_][a-zA-Z0-9_]*"))
+                    || (tableParts.length == 3 && "AS".equalsIgnoreCase(tableParts[1]) && tableParts[2].matches("[a-zA-Z_][a-zA-Z0-9_]*"));
+            if (!validAlias) {
+                throw new IllegalArgumentException("Invalid SELECT query syntax.");
+            }
+        }
         String whereBody = m.group(3) != null ? m.group(3).trim() : null;
         String orderByCol = m.group(4) != null ? m.group(4).trim() : null;
         if (orderByCol != null && orderByCol.contains(".")) {
@@ -237,9 +248,7 @@ public class SQLParser {
         String[] items = selectBody.split(",");
         for (String item : items) {
             item = item.trim();
-            if (item.contains(".")) {
-                item = item.substring(item.lastIndexOf('.') + 1);
-            }
+            item = stripTableQualifier(item);
             if (item.toUpperCase().startsWith("AI_SUMMARIZE(")) {
                 String arg = extractFunctionArg(item);
                 stmt.getSelectItems().add(new AST.SelectItem(arg, "ai_summary", "AI_SUMMARIZE", new String[]{arg}));
@@ -314,6 +323,20 @@ public class SQLParser {
         return new AST.StreamPublishStatement(topic, map);
     }
 
+    /**
+     * Strips a leading "alias." table qualifier from a select item, e.g. Hibernate's
+     * "p1_0.id" -> "id". Only fires on a plain qualified identifier (or "alias.*"),
+     * never on expressions containing a dot for another reason, such as a decimal
+     * literal ("1.5") or a qualifier-free expression.
+     */
+    private String stripTableQualifier(String item) {
+        Matcher qm = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*\\.([a-zA-Z0-9_]+|\\*)(\\s+.*)?$").matcher(item);
+        if (qm.matches()) {
+            return qm.group(1) + (qm.group(2) != null ? qm.group(2) : "");
+        }
+        return item;
+    }
+
     private String extractAiEmbedArg(String expr) {
         Pattern p = Pattern.compile("AI_EMBED\\(['\"]?(.*?)['\"]?\\)", Pattern.CASE_INSENSITIVE);
         Matcher m = p.matcher(expr);
@@ -357,7 +380,11 @@ public class SQLParser {
     private String unquote(String val) {
         if (val == null) return null;
         val = val.trim();
-        if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith("\"") && val.endsWith("\""))) {
+        if (val.length() >= 2 && val.startsWith("'") && val.endsWith("'")) {
+            // SQL-standard escaping: a doubled '' inside a single-quoted literal is one literal quote.
+            return val.substring(1, val.length() - 1).replace("''", "'");
+        }
+        if (val.length() >= 2 && val.startsWith("\"") && val.endsWith("\"")) {
             return val.substring(1, val.length() - 1);
         }
         return val;

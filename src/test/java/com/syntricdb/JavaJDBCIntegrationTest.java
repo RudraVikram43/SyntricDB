@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -89,6 +90,136 @@ public class JavaJDBCIntegrationTest {
         assertThrows(SQLException.class, () -> {
             DriverManager.getConnection("jdbc:syntricdb://admin:wrong_pass@localhost:8899/default");
         });
+    }
+
+    @Test
+    public void testPreparedStatementQuestionMarkInsideStringLiteralIsNotAPlaceholder() throws Exception {
+        SyntricConfig config = new SyntricConfig();
+        SecurityManager securityManager = new SecurityManager("admin", "syntricdb_secret_pass");
+        nettyServer = new NettyServer(8902, storageEngine, new AIEngine(128), queryExecutor, new com.syntricdb.cluster.ClusterState(), securityManager, config);
+        nettyServer.start();
+
+        queryExecutor.execute("CREATE TABLE products (id VARCHAR PRIMARY KEY, title VARCHAR, price DOUBLE)");
+        queryExecutor.execute("INSERT INTO products VALUES ('p1', 'is this ok?', 5.0)");
+
+        Connection conn = DriverManager.getConnection("jdbc:syntricdb://admin:syntricdb_secret_pass@localhost:8902/default");
+        PreparedStatement ps = conn.prepareStatement("SELECT * FROM products WHERE title = 'is this ok?' AND id = ?");
+        ps.setString(1, "p1");
+        ResultSet rs = ps.executeQuery();
+
+        assertTrue(rs.next());
+        assertEquals("p1", rs.getString("id"));
+        conn.close();
+    }
+
+    @Test
+    public void testPreparedStatementDollarParametersDoNotCollideBySubstring() throws Exception {
+        SyntricConfig config = new SyntricConfig();
+        SecurityManager securityManager = new SecurityManager("admin", "syntricdb_secret_pass");
+        nettyServer = new NettyServer(8903, storageEngine, new AIEngine(128), queryExecutor, new com.syntricdb.cluster.ClusterState(), securityManager, config);
+        nettyServer.start();
+
+        queryExecutor.execute("CREATE TABLE products (id VARCHAR PRIMARY KEY, title VARCHAR, price DOUBLE)");
+        queryExecutor.execute("INSERT INTO products VALUES ('p1', 'Widget', 1.0)");
+
+        Connection conn = DriverManager.getConnection("jdbc:syntricdb://admin:syntricdb_secret_pass@localhost:8903/default");
+        PreparedStatement ps = conn.prepareStatement("UPDATE products SET price = $10 WHERE id = $1");
+        ps.setString(1, "p1");
+        ps.setDouble(10, 42.0);
+        ps.executeUpdate();
+
+        assertEquals(42.0, storageEngine.getByPrimaryKey("default", "products", "p1").getDouble("price"), 0.001);
+        conn.close();
+    }
+
+    @Test
+    public void testPreparedStatementSetBytesEscapesEmbeddedQuote() throws Exception {
+        SyntricConfig config = new SyntricConfig();
+        SecurityManager securityManager = new SecurityManager("admin", "syntricdb_secret_pass");
+        nettyServer = new NettyServer(8904, storageEngine, new AIEngine(128), queryExecutor, new com.syntricdb.cluster.ClusterState(), securityManager, config);
+        nettyServer.start();
+
+        queryExecutor.execute("CREATE TABLE products (id VARCHAR PRIMARY KEY, title VARCHAR, price DOUBLE)");
+
+        Connection conn = DriverManager.getConnection("jdbc:syntricdb://admin:syntricdb_secret_pass@localhost:8904/default");
+        PreparedStatement ps = conn.prepareStatement("INSERT INTO products (id, title, price) VALUES (?, ?, ?)");
+        ps.setString(1, "p2");
+        ps.setBytes(2, "O'Brien".getBytes(StandardCharsets.UTF_8));
+        ps.setDouble(3, 9.99);
+        ps.executeUpdate();
+
+        assertEquals("O'Brien", storageEngine.getByPrimaryKey("default", "products", "p2").getString("title"));
+        conn.close();
+    }
+
+    @Test
+    public void testEmptySelectReturnsEmptyResultSetInsteadOfThrowing() throws Exception {
+        SyntricConfig config = new SyntricConfig();
+        SecurityManager securityManager = new SecurityManager("admin", "syntricdb_secret_pass");
+        nettyServer = new NettyServer(8905, storageEngine, new AIEngine(128), queryExecutor, new com.syntricdb.cluster.ClusterState(), securityManager, config);
+        nettyServer.start();
+
+        queryExecutor.execute("CREATE TABLE products (id VARCHAR PRIMARY KEY, title VARCHAR, price DOUBLE)");
+
+        Connection conn = DriverManager.getConnection("jdbc:syntricdb://admin:syntricdb_secret_pass@localhost:8905/default");
+        Statement stmt = conn.createStatement();
+        ResultSet rs = stmt.executeQuery("SELECT * FROM products WHERE id = 'does_not_exist'");
+
+        assertFalse(rs.next());
+        conn.close();
+    }
+
+    @Test
+    public void testManualCommitTransactionRollbackDiscardsWrites() throws Exception {
+        SyntricConfig config = new SyntricConfig();
+        SecurityManager securityManager = new SecurityManager("admin", "syntricdb_secret_pass");
+        nettyServer = new NettyServer(8900, storageEngine, new AIEngine(128), queryExecutor, new com.syntricdb.cluster.ClusterState(), securityManager, config);
+        nettyServer.start();
+
+        queryExecutor.execute("CREATE TABLE accounts (id VARCHAR PRIMARY KEY, balance DOUBLE)");
+        queryExecutor.execute("INSERT INTO accounts VALUES ('a1', 100.0)");
+
+        Connection conn = DriverManager.getConnection("jdbc:syntricdb://admin:syntricdb_secret_pass@localhost:8900/default");
+        conn.setAutoCommit(false);
+        Statement stmt = conn.createStatement();
+        stmt.executeUpdate("INSERT INTO accounts VALUES ('a2', 50.0)");
+        stmt.executeUpdate("UPDATE accounts SET balance = 999.0 WHERE id = 'a1'");
+
+        // Neither write is visible to the storage engine until commit.
+        assertNull(storageEngine.getByPrimaryKey("default", "accounts", "a2"));
+        assertEquals(100.0, storageEngine.getByPrimaryKey("default", "accounts", "a1").getDouble("balance"), 0.01);
+
+        conn.rollback();
+        conn.close();
+
+        // Rollback discards them for good: nothing was ever written.
+        assertNull(storageEngine.getByPrimaryKey("default", "accounts", "a2"));
+        assertEquals(100.0, storageEngine.getByPrimaryKey("default", "accounts", "a1").getDouble("balance"), 0.01);
+    }
+
+    @Test
+    public void testManualCommitTransactionCommitAppliesWrites() throws Exception {
+        SyntricConfig config = new SyntricConfig();
+        SecurityManager securityManager = new SecurityManager("admin", "syntricdb_secret_pass");
+        nettyServer = new NettyServer(8901, storageEngine, new AIEngine(128), queryExecutor, new com.syntricdb.cluster.ClusterState(), securityManager, config);
+        nettyServer.start();
+
+        queryExecutor.execute("CREATE TABLE accounts (id VARCHAR PRIMARY KEY, balance DOUBLE)");
+
+        Connection conn = DriverManager.getConnection("jdbc:syntricdb://admin:syntricdb_secret_pass@localhost:8901/default");
+        conn.setAutoCommit(false);
+        Statement stmt = conn.createStatement();
+        stmt.executeUpdate("INSERT INTO accounts VALUES ('a3', 75.0)");
+
+        // Queued, not yet applied.
+        assertNull(storageEngine.getByPrimaryKey("default", "accounts", "a3"));
+
+        conn.commit();
+
+        assertNotNull(storageEngine.getByPrimaryKey("default", "accounts", "a3"));
+        assertEquals(75.0, storageEngine.getByPrimaryKey("default", "accounts", "a3").getDouble("balance"), 0.01);
+
+        conn.close();
     }
 
     @Test

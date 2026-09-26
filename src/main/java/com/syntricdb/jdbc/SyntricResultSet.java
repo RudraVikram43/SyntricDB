@@ -363,11 +363,23 @@ public class SyntricResultSet implements ResultSet {
 
     @Override
     public boolean absolute(int row) throws SQLException {
-        if (row > 0 && row <= rows.size()) {
-            currentIndex = row - 1;
-            return true;
+        int size = rows.size();
+        if (row == 0) {
+            currentIndex = -1;
+            return false;
         }
-        return false;
+        // Positive: 1-based from the start. Negative: from the end (-1 = last row).
+        int targetIndex = row > 0 ? row - 1 : size + row;
+        if (targetIndex < 0) {
+            currentIndex = -1;
+            return false;
+        }
+        if (targetIndex >= size) {
+            currentIndex = size;
+            return false;
+        }
+        currentIndex = targetIndex;
+        return true;
     }
 
     @Override
