@@ -2,8 +2,9 @@ from setuptools import setup, find_packages
 
 setup(
     name="syntricdb-client",
-    version="1.0.0",
-    description="Official Python Client for SyntricDB AI-Native Unified Database Engine",
+    version="1.1.0",
+    description="Official Python Client for SyntricDB AI-Native Unified Database Engine, "
+                 "including a PEP 249 (DB-API 2.0) driver",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     author="Upendra Manike",
@@ -13,6 +14,9 @@ setup(
     install_requires=[
         "requests>=2.28.0",
     ],
+    extras_require={
+        "test": ["pytest>=7.0"],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
