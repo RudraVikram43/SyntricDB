@@ -78,6 +78,21 @@ public class SQLParserTest {
     }
 
     @Test
+    public void testParseSelectHandlesGreaterAndLessThanOrEqualOperators() throws Exception {
+        AST.Statement stmt = parser.parse("SELECT * FROM users WHERE age >= 5");
+        assertTrue(stmt instanceof AST.SelectStatement);
+        AST.Condition cond = ((AST.SelectStatement) stmt).getWhereConditions().get(0);
+        assertEquals("age", cond.getColumn());
+        assertEquals(">=", cond.getOperator());
+        assertEquals(5, cond.getValue());
+
+        AST.Statement stmt2 = parser.parse("SELECT * FROM users WHERE age <= 5");
+        AST.Condition cond2 = ((AST.SelectStatement) stmt2).getWhereConditions().get(0);
+        assertEquals("<=", cond2.getOperator());
+        assertEquals(5, cond2.getValue());
+    }
+
+    @Test
     public void testParseSelectPreservesDecimalLiteralInSelectList() throws Exception {
         AST.Statement stmt = parser.parse("SELECT price * 1.5 AS total FROM products");
         assertTrue(stmt instanceof AST.SelectStatement);

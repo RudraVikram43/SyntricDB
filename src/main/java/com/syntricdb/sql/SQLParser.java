@@ -286,7 +286,7 @@ public class SQLParser {
                 }
                 // Scalar conditions: e.g., city='Hyderabad' or age>30 or p1_0.id='test_prod_1'
                 else {
-                    Pattern scalarP = Pattern.compile("([a-zA-Z0-9_\\.]+)\\s*(=|!=|>|<|>=|<=)\\s*(.*)");
+                    Pattern scalarP = Pattern.compile("([a-zA-Z0-9_\\.]+)\\s*(>=|<=|!=|=|>|<)\\s*(.*)");
                     Matcher scalarM = scalarP.matcher(cond);
                     if (scalarM.find()) {
                         String rawCol = scalarM.group(1);
@@ -421,7 +421,7 @@ public class SQLParser {
         if (whereBody != null && !whereBody.isBlank()) {
             String[] conds = whereBody.split("(?i)\\s+AND\\s+");
             for (String cond : conds) {
-                Pattern scalarP = Pattern.compile("([a-zA-Z0-9_]+)\\s*(=|!=|>|<|>=|<=)\\s*(.*)");
+                Pattern scalarP = Pattern.compile("([a-zA-Z0-9_]+)\\s*(>=|<=|!=|=|>|<)\\s*(.*)");
                 Matcher scalarM = scalarP.matcher(cond.trim());
                 if (scalarM.find()) {
                     stmt.getWhereConditions().add(new AST.Condition(scalarM.group(1), scalarM.group(2), parseLiteral(unquote(scalarM.group(3)))));
@@ -444,7 +444,7 @@ public class SQLParser {
         if (whereBody != null && !whereBody.isBlank()) {
             String[] conds = whereBody.split("(?i)\\s+AND\\s+");
             for (String cond : conds) {
-                Pattern scalarP = Pattern.compile("([a-zA-Z0-9_]+)\\s*(=|!=|>|<|>=|<=)\\s*(.*)");
+                Pattern scalarP = Pattern.compile("([a-zA-Z0-9_]+)\\s*(>=|<=|!=|=|>|<)\\s*(.*)");
                 Matcher scalarM = scalarP.matcher(cond.trim());
                 if (scalarM.find()) {
                     stmt.getWhereConditions().add(new AST.Condition(scalarM.group(1), scalarM.group(2), parseLiteral(unquote(scalarM.group(3)))));
